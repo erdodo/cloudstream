@@ -306,4 +306,11 @@ object BackupUtils {
             else -> SafeFile.fromFilePath(context, path)
         }
     }
+
+    /**
+     * Public access to backup data for cloud sync
+     */
+    fun getBackupData(context: Context?): BackupFile? {
+        return getBackup(context)
+    }
 }

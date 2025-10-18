@@ -148,6 +148,7 @@ import com.lagradost.cloudstream3.utils.BiometricAuthenticator.deviceHasPassword
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.isAuthEnabled
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.promptInfo
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.startBiometricAuthentication
+import com.lagradost.cloudstream3.utils.CloudSyncManager
 import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
 import com.lagradost.cloudstream3.utils.Coroutines.main
 import com.lagradost.cloudstream3.utils.DataStore.getKey
@@ -631,6 +632,10 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         super.onResume()
         afterPluginsLoadedEvent += ::onAllPluginsLoaded
         setActivityInstance(this)
+        
+        // Sync from cloud when app resumes
+        CloudSyncManager.onResume(this)
+        
         try {
             if (isCastApiAvailable()) {
                 mSessionManager?.addSessionManagerListener(mSessionManagerListener)
@@ -699,6 +704,9 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
     }
 
     override fun onDestroy() {
+        // Stop cloud sync
+        CloudSyncManager.stop()
+
         filesToDelete.forEach { path ->
             val result = File(path).deleteRecursively()
             if (result) {
@@ -1379,6 +1387,9 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
             builder.show().setDefaultFocus()
         }
 
+        // Initialize cloud sync after everything is set up
+        CloudSyncManager.initialize(this)
+
 
         fun setUserData(status: Resource<SyncAPI.AbstractSyncStatus>?) {
             if (isLocalList) return
@@ -1758,7 +1769,7 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
             var prevId: Int? = null
             var prevView: View? = null
 
-            // The genius engineers at google did not actually 
+            // The genius engineers at google did not actually
             // write a nextFocus for the navrail
             rail.findViewById<View?>(R.id.navigation_settings)?.nextFocusDownId =
                 R.id.nav_footer_profile_card
