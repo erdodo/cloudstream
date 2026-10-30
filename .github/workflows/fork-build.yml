@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -46,6 +46,7 @@ jobs:
           if [ -n "$KEYSTORE_B64" ]; then
             mkdir -p "$HOME/work/_temp/keystore"
             echo "$KEYSTORE_B64" | base64 -d > "$HOME/work/_temp/keystore/fork.jks"
+            echo "SIGNED=true" >> "$GITHUB_ENV"
             echo "SIGNING_KEY_ALIAS=${{ secrets.SIGNING_KEY_ALIAS }}" >> "$GITHUB_ENV"
             echo "SIGNING_STORE_PASSWORD=${{ secrets.SIGNING_STORE_PASSWORD }}" >> "$GITHUB_ENV"
             echo "SIGNING_KEY_PASSWORD=${{ secrets.SIGNING_KEY_PASSWORD }}" >> "$GITHUB_ENV"
@@ -64,3 +65,16 @@ jobs:
         with:
           name: cloudstream-${{ steps.version.outputs.version }}
           path: app/build/outputs/apk/prerelease/release/*.apk
+
+      - name: Publish release (signed builds only)
+        if: env.SIGNED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          APK="cloudstream-$V.apk"
+          cp app/build/outputs/apk/prerelease/release/*.apk "$APK"
+          gh release create "v$V" "$APK" --prerelease --target "$GITHUB_SHA" \
+            --title "CloudStream $V" \
+            --notes "Fork build $V (signed with the fork key). Commit: $GITHUB_SHA" \
+          || gh release upload "v$V" "$APK" --clobber
