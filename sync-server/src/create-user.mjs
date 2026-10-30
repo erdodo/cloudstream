@@ -1,5 +1,6 @@
-// Usage: node src/create-user.mjs <name>
-// Prints a one-time token. Only its SHA-256 hash is stored.
+// Usage: node src/create-user.mjs <name> [custom-token]
+// Without a custom token a random one is generated and printed once.
+// A custom token must be at least 12 characters. Only its SHA-256 hash is stored.
 import { randomBytes, createHash } from "node:crypto";
 import { pool } from "./db.mjs";
 
@@ -8,7 +9,12 @@ if (!name) {
   console.error("usage: create-user <name>");
   process.exit(1);
 }
-const token = randomBytes(32).toString("base64url");
+const custom = process.argv[3];
+if (custom !== undefined && custom.length < 12) {
+  console.error("custom token must be at least 12 characters");
+  process.exit(1);
+}
+const token = custom ?? randomBytes(32).toString("base64url");
 const hash = createHash("sha256").update(token).digest("hex");
 await pool.query(
   "INSERT INTO users (name, token_hash, created_at) VALUES ($1, $2, $3)",
