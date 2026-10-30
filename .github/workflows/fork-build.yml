@@ -39,6 +39,20 @@ jobs:
         run: |
           sed -i 's/^versionName = .*/versionName = "${{ steps.version.outputs.version }}"/' gradle/libs.versions.toml
 
+      - name: Prepare signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p "$HOME/work/_temp/keystore"
+            echo "$KEYSTORE_B64" | base64 -d > "$HOME/work/_temp/keystore/fork.jks"
+            echo "SIGNING_KEY_ALIAS=${{ secrets.SIGNING_KEY_ALIAS }}" >> "$GITHUB_ENV"
+            echo "SIGNING_STORE_PASSWORD=${{ secrets.SIGNING_STORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "SIGNING_KEY_PASSWORD=${{ secrets.SIGNING_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          else
+            echo "No signing secrets: APK will be unsigned"
+          fi
+
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build prerelease APK
