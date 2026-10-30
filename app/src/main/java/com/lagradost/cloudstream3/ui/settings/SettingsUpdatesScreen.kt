@@ -166,6 +166,13 @@ object SettingsUpdatesScreen : SearchableSettings {
                         }
                     ),
                     Preference.PreferenceItem.TextPreference(
+                        title = stringResource(R.string.self_sync_title),
+                        icon = painterResource(R.drawable.save_as_24px),
+                        onClick = {
+                            activity?.let { SelfSyncDialog.show(it) }
+                        }
+                    ),
+                    Preference.PreferenceItem.TextPreference(
                         title = stringResource(R.string.restore_settings),
                         icon = painterResource(R.drawable.restore_page_24px),
                         onClick = {

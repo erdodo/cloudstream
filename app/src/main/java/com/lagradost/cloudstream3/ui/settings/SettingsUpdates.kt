@@ -2,12 +2,7 @@ package com.lagradost.cloudstream3.ui.settings
 
 import android.net.Uri
 import android.os.Bundle
-import android.text.InputType
 import android.view.View
-import android.widget.CheckBox
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.edit
@@ -35,7 +30,6 @@ import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.setTool
 import com.lagradost.cloudstream3.ui.settings.SettingsFragment.Companion.setUpToolbar
 import com.lagradost.cloudstream3.ui.settings.utils.getChooseFolderLauncher
 import com.lagradost.cloudstream3.utils.BackupUtils
-import com.lagradost.cloudstream3.utils.SelfHostedSync
 import com.lagradost.cloudstream3.utils.BackupUtils.restorePrompt
 import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
 import com.lagradost.cloudstream3.utils.InAppUpdater.installPreReleaseIfNeeded
@@ -75,51 +69,6 @@ class SettingsUpdates : BasePreferenceFragmentCompat() {
         }
     }
 
-    private fun showSelfSyncDialog() {
-        val ctx = context ?: return
-        val cfg = SelfHostedSync.getConfig(ctx)
-        val pad = (16 * resources.displayMetrics.density).toInt()
-
-        val url = EditText(ctx).apply {
-            hint = getString(R.string.self_sync_url_hint)
-            setText(cfg.url)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        }
-        val token = EditText(ctx).apply {
-            hint = getString(R.string.self_sync_token_hint)
-            setText(cfg.token)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        val enabled = CheckBox(ctx).apply {
-            text = getString(R.string.self_sync_enabled)
-            isChecked = cfg.enabled
-        }
-        val statusView = TextView(ctx).apply { text = SelfHostedSync.status }
-
-        val layout = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, 0)
-            addView(url)
-            addView(token)
-            addView(enabled)
-            addView(statusView)
-        }
-
-        AlertDialog.Builder(ctx)
-            .setTitle(R.string.self_sync_title)
-            .setView(layout)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                SelfHostedSync.configure(
-                    ctx,
-                    url.text.toString(),
-                    token.text.toString(),
-                    enabled.isChecked
-                )
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
-
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         hideKeyboard()
         setPreferencesFromResource(R.xml.settings_updates, rootKey)
@@ -127,11 +76,6 @@ class SettingsUpdates : BasePreferenceFragmentCompat() {
 
         getPref(R.string.backup_key)?.setOnPreferenceClickListener {
             BackupUtils.backup(activity)
-            return@setOnPreferenceClickListener true
-        }
-
-        getPref(R.string.self_sync_key)?.setOnPreferenceClickListener {
-            showSelfSyncDialog()
             return@setOnPreferenceClickListener true
         }
 

@@ -161,7 +161,6 @@
         <item quantity="one">@string/episode</item>
         <item quantity="other">@string/episodes</item>
     </plurals>
-    <string name="self_sync_key">self_sync_key</string>
     <string name="self_sync_title">Cloud sync (own server)</string>
     <string name="self_sync_url_hint">http://server.local:8787</string>
     <string name="self_sync_token_hint">Access token</string>

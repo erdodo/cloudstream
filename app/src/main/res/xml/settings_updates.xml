@@ -41,11 +41,6 @@
             android:title="@string/backup_frequency" />
 
         <Preference
-            android:icon="@drawable/baseline_save_as_24"
-            android:key="@string/self_sync_key"
-            android:title="@string/self_sync_title" />
-
-        <Preference
             android:icon="@drawable/baseline_restore_page_24"
             android:key="@string/restore_key"
             android:title="@string/restore_settings" />
