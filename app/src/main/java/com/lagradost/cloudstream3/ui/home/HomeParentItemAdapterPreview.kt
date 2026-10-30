@@ -83,6 +83,16 @@ class HomeParentItemAdapterPreview(
             false
         ) else FragmentHomeHeadBinding.inflate(inflater, parent, false)
 
+        if (binding is FragmentHomeHeadTvBinding) {
+            // A fixed 400dp hero fills a small or low-density screen and hides the first row.
+            // Use about half of the screen height so the first row peeks in below it.
+            val metrics = parent.resources.displayMetrics
+            val heroHeight = (metrics.heightPixels * 0.55f).toInt()
+                .coerceIn((260 * metrics.density).toInt(), (400 * metrics.density).toInt())
+            binding.homePreviewInfoBtt.layoutParams =
+                binding.homePreviewInfoBtt.layoutParams.apply { height = heroHeight }
+        }
+
         if (binding is FragmentHomeHeadTvBinding && isLayout(EMULATOR)) {
             binding.homeBookmarkParentItemMoreInfo.isVisible = true
 

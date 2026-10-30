@@ -48,6 +48,7 @@ import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ImageAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
+import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.updateTv
 import com.lagradost.cloudstream3.ui.settings.extensions.PluginAdapter
@@ -534,6 +535,45 @@ object CommonActivity {
     }
 
 
+    /**
+     * Shortcuts for TV remotes:
+     * red = search, green = library, yellow = downloads, blue = settings, Search key = search,
+     * Menu = long press on the focused item (its context menu), Channel up/down = page scroll.
+     * Only the colour keys are used while typing in a text field.
+     * @return true if the key was handled
+     */
+    private fun handleTvShortcut(act: Activity, focus: View?, keyCode: Int): Boolean {
+        // Colour keys never type anything, so they also work while a text field has focus.
+        val isColourKey = keyCode in KeyEvent.KEYCODE_PROG_RED..KeyEvent.KEYCODE_PROG_BLUE
+        if (focus is android.widget.EditText && !isColourKey) return false
+
+        fun openRailItem(id: Int): Boolean {
+            val item = act.findViewById<View>(id) ?: return false
+            item.performClick()
+            return true
+        }
+
+        return when (keyCode) {
+            KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_SEARCH -> openRailItem(R.id.navigation_search)
+            KeyEvent.KEYCODE_PROG_GREEN -> openRailItem(R.id.navigation_library)
+            KeyEvent.KEYCODE_PROG_YELLOW -> openRailItem(R.id.navigation_downloads)
+            KeyEvent.KEYCODE_PROG_BLUE -> openRailItem(R.id.navigation_settings)
+            KeyEvent.KEYCODE_MENU -> focus?.performLongClick() == true
+            KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                var parent = focus?.parent
+                while (parent != null && parent !is androidx.recyclerview.widget.RecyclerView) {
+                    parent = parent.parent
+                }
+                val list = parent as? androidx.recyclerview.widget.RecyclerView ?: return false
+                val direction = if (keyCode == KeyEvent.KEYCODE_CHANNEL_UP) -1 else 1
+                list.smoothScrollBy(0, direction * (list.height * 0.8f).toInt())
+                true
+            }
+
+            else -> false
+        }
+    }
+
     fun onKeyDown(act: Activity?, keyCode: Int, event: KeyEvent?): Boolean? {
         return null
     }
@@ -542,6 +582,13 @@ object CommonActivity {
     fun dispatchKeyEvent(act: Activity?, event: KeyEvent?): Boolean? {
         if (act == null) return null
         val currentFocus = act.currentFocus
+
+        // Remote shortcuts (colour keys, Menu, Search, Channel up/down) on TV layouts.
+        if (event != null && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            isLayout(TV or EMULATOR) && handleTvShortcut(act, currentFocus, event.keyCode)
+        ) {
+            return true
+        }
 
         event?.keyCode?.let { keyCode ->
             if (currentFocus == null || event.action != KeyEvent.ACTION_DOWN) return@let
