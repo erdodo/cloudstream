@@ -19,3 +19,9 @@ CREATE TABLE IF NOT EXISTS sync_entries (
 
 CREATE INDEX IF NOT EXISTS sync_entries_user_updated
   ON sync_entries (user_id, updated_at);
+
+-- Server-assigned monotonically increasing change number. Clients pull by seq,
+-- not by (client-supplied) updated_at, so skewed device clocks cannot hide changes.
+CREATE SEQUENCE IF NOT EXISTS sync_seq;
+ALTER TABLE sync_entries ADD COLUMN IF NOT EXISTS seq BIGINT NOT NULL DEFAULT nextval('sync_seq');
+CREATE INDEX IF NOT EXISTS sync_entries_user_seq ON sync_entries (user_id, seq);

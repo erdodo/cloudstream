@@ -118,6 +118,9 @@ object BackupUtils {
         return !nonTransferableKeys.any { this.contains(it) }
     }
 
+    /** Same filter as backups, shared with [SelfHostedSync]. */
+    fun isTransferableKey(key: String): Boolean = key.isTransferable()
+
     private var restoreFileSelector: ActivityResultLauncher<Array<String>>? = null
 
     // Kinda hack, but I couldn't think of a better way

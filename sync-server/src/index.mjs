@@ -1,5 +1,5 @@
 // Sync protocol (all under /v1, JSON, Authorization: Bearer <token>)
-//   GET  /v1/changes?since=<ms>   -> { now, entries: [{key,value,deleted,updatedAt,deviceId}] }
+//   GET  /v1/changes?since=<seq>  -> { now, cursor, more, entries: [{key,value,deleted,updatedAt,seq,deviceId}] }
 //   POST /v1/changes              -> body { deviceId, entries:[{key,value,deleted,updatedAt}] }
 //                                    -> { accepted, rejected } (LWW: stored only if newer)
 import { createServer } from "node:http";
@@ -49,18 +49,20 @@ async function handleGet(userId, url, res) {
   if (!Number.isFinite(since) || since < 0) return send(res, 400, { error: "bad since" });
   const now = Date.now();
   const { rows } = await pool.query(
-    `SELECT key, value, deleted, updated_at, device_id FROM sync_entries
-     WHERE user_id = $1 AND updated_at > $2 ORDER BY updated_at ASC LIMIT $3`,
+    `SELECT key, value, deleted, updated_at, seq, device_id FROM sync_entries
+     WHERE user_id = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`,
     [userId, since, MAX_ENTRIES],
   );
   send(res, 200, {
     now,
+    cursor: rows.length ? Number(rows[rows.length - 1].seq) : since,
     more: rows.length === MAX_ENTRIES,
     entries: rows.map((r) => ({
       key: r.key,
       value: r.value,
       deleted: r.deleted,
       updatedAt: Number(r.updated_at),
+      seq: Number(r.seq),
       deviceId: r.device_id,
     })),
   });
@@ -92,15 +94,16 @@ async function handlePost(userId, req, res) {
   const deleted = valid.map((e) => e.deleted);
   const times = valid.map((e) => e.updatedAt);
   const result = await pool.query(
-    `INSERT INTO sync_entries (user_id, key, value, deleted, updated_at, device_id)
-     SELECT $1, t.key, t.value, t.deleted, t.updated_at, $6
+    `INSERT INTO sync_entries (user_id, key, value, deleted, updated_at, device_id, seq)
+     SELECT $1, t.key, t.value, t.deleted, t.updated_at, $6, nextval('sync_seq')
      FROM unnest($2::text[], $3::text[], $4::bool[], $5::bigint[])
        AS t(key, value, deleted, updated_at)
      ON CONFLICT (user_id, key) DO UPDATE SET
        value = EXCLUDED.value,
        deleted = EXCLUDED.deleted,
        updated_at = EXCLUDED.updated_at,
-       device_id = EXCLUDED.device_id
+       device_id = EXCLUDED.device_id,
+       seq = EXCLUDED.seq
      WHERE sync_entries.updated_at < EXCLUDED.updated_at`,
     [userId, keys, values, deleted, times, body.deviceId],
   );
