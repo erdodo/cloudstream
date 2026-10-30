@@ -2,7 +2,13 @@ package com.lagradost.cloudstream3.utils
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mvvm.logError
+import com.lagradost.cloudstream3.plugins.PluginManager
+import com.lagradost.cloudstream3.plugins.RepositoryManager
+import com.lagradost.cloudstream3.ui.settings.extensions.REPOSITORIES_KEY
+import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
 import com.lagradost.cloudstream3.utils.DataStore.getDefaultSharedPrefs
 import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
 import kotlinx.coroutines.CancellationException
@@ -65,11 +71,15 @@ object SelfHostedSync {
     /** Per key: hash of the last value we agreed on with the server, and its timestamp. */
     private class KeyState(val hash: String, val ts: Long)
 
+    /** A plugin change from the server that still has to be applied on this device. */
+    private class Pending(val value: String?, val ts: Long)
+
     private class Meta(
         var cursor: Long,
         var clockOffset: Long,
         var bootstrapped: Boolean,
         val keys: MutableMap<String, KeyState>,
+        val pending: MutableMap<String, Pending>,
     )
 
     private class Entry(
@@ -117,6 +127,7 @@ object SelfHostedSync {
                     val cfg = getConfig(appContext)
                     if (cfg.enabled && cfg.url.startsWith("http") && cfg.token.isNotEmpty()) {
                         syncOnce(appContext, cfg)
+                        reconcilePlugins(appContext)
                     } else {
                         status = "Off"
                     }
@@ -217,12 +228,13 @@ object SelfHostedSync {
 
     private fun push(context: Context, cfg: Config, state: Meta, deviceId: String) {
         val now = System.currentTimeMillis() + state.clockOffset
-        val local = readLocal(context)
+        val local = HashMap<String, String>()
+        readLocal(context).forEach { (k, v) -> encode(v)?.let { local[k] = it } }
+        local.putAll(localPluginEntries(context))
         val outgoing = ArrayList<Entry>()
         val newStates = HashMap<String, KeyState>()
 
-        for ((key, value) in local) {
-            val encoded = encode(value) ?: continue
+        for ((key, encoded) in local) {
             val h = hash(encoded)
             if (state.keys[key]?.hash != h) {
                 outgoing += Entry(key, encoded, false, now)
@@ -230,7 +242,11 @@ object SelfHostedSync {
             }
         }
         for ((key, known) in state.keys) {
-            if (key !in local && known.hash != DELETED) {
+            // A plugin counts as present as long as its file exists, even if its repository
+            // is not (yet) in the local repository list.
+            val present = if (key.startsWith("p:")) pluginFile(context, key)?.exists() == true
+            else key in local
+            if (!present && known.hash != DELETED) {
                 outgoing += Entry(key, null, true, now)
                 newStates[key] = KeyState(DELETED, now)
             }
@@ -324,6 +340,10 @@ object SelfHostedSync {
         val localNow by lazy { readLocal(context) }
 
         for (entry in entries) {
+            if (entry.key.startsWith("p:")) {
+                handlePluginEntry(context, state, entry, unconditional)
+                continue
+            }
             val scopeEditor = when {
                 entry.key.startsWith("d:") -> dataEditor
                 entry.key.startsWith("s:") -> settingsEditor
@@ -356,6 +376,107 @@ object SelfHostedSync {
         settingsEditor.apply()
     }
 
+    // ---- plugins ------------------------------------------------------------------
+    // Plugin files live on the device, so they are synced as small "installed from repo X"
+    // entries (key "p:<repo folder>/<plugin name>") and downloaded/removed locally.
+
+    private fun allRepositories(): List<RepositoryData> =
+        ((getKey<Array<RepositoryData>>(REPOSITORIES_KEY) ?: emptyArray()) +
+            RepositoryManager.PREBUILT_REPOSITORIES).toList()
+
+    /** Installed online plugins as sync entries: key -> encoded value. */
+    private fun localPluginEntries(context: Context): Map<String, String> {
+        val repos = allRepositories()
+        val out = HashMap<String, String>()
+        for (data in PluginManager.getPluginsOnline()) {
+            if (!data.isOnline) continue
+            val url = data.url ?: continue
+            val file = File(data.filePath)
+            if (!file.exists()) continue
+            val folder = file.parentFile?.name ?: continue
+            val repo = repos.firstOrNull {
+                PluginManager.getPluginSanitizedFileName(it.url) == folder
+            } ?: continue
+            out["p:$folder/${data.internalName}"] = JSONObject()
+                .put("n", data.internalName)
+                .put("u", url)
+                .put("r", repo.url)
+                .toString()
+        }
+        return out
+    }
+
+    private fun pluginFile(context: Context, key: String): File? {
+        val rest = key.removePrefix("p:")
+        val slash = rest.indexOf('/')
+        if (slash < 0) return null
+        val folder = rest.substring(0, slash)
+        val name = rest.substring(slash + 1)
+        return File(
+            context.filesDir,
+            "${RepositoryManager.ONLINE_PLUGINS_FOLDER}/$folder/" +
+                "${PluginManager.getPluginSanitizedFileName(name)}.cs3"
+        )
+    }
+
+    private fun handlePluginEntry(
+        context: Context,
+        state: Meta,
+        entry: Entry,
+        unconditional: Boolean,
+    ) {
+        val known = state.keys[entry.key]
+        if (!unconditional && known != null && entry.updatedAt <= known.ts) return
+        val installed = pluginFile(context, entry.key)?.exists() == true
+
+        if (entry.deleted || entry.value == null) {
+            state.keys[entry.key] = KeyState(DELETED, entry.updatedAt)
+            if (installed) state.pending[entry.key] = Pending(null, entry.updatedAt)
+            else state.pending.remove(entry.key)
+        } else if (installed) {
+            state.pending.remove(entry.key)
+            state.keys[entry.key] = KeyState(hash(entry.value), entry.updatedAt)
+        } else {
+            state.pending[entry.key] = Pending(entry.value, entry.updatedAt)
+        }
+    }
+
+    /** Applies pending plugin installs/removals. Needs a foreground activity for downloads. */
+    private suspend fun reconcilePlugins(context: Context) {
+        val activity = CommonActivity.activity ?: return
+        val state = synchronized(this) { loadMeta(context) }
+        val work = synchronized(this) { state.pending.toMap() }
+        if (work.isEmpty()) return
+        val repoUrls = allRepositories().map { it.url }.toSet()
+
+        for ((key, change) in work) {
+            try {
+                val file = pluginFile(context, key)
+                if (change.value == null) {
+                    if (file != null && file.exists()) PluginManager.deletePlugin(file)
+                    synchronized(this) { state.pending.remove(key) }
+                } else {
+                    val json = JSONObject(change.value)
+                    val repoUrl = json.getString("r")
+                    // The repository list is itself synced; wait until it has arrived.
+                    if (repoUrl !in repoUrls) continue
+                    val ok = PluginManager.downloadPlugin(
+                        activity, json.getString("u"), null, json.getString("n"), repoUrl, true
+                    )
+                    if (ok) synchronized(this) {
+                        state.keys[key] = KeyState(hash(change.value), change.ts)
+                        state.pending.remove(key)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logError(e)
+            }
+        }
+        synchronized(this) { saveMeta(context, state) }
+    }
+
     // ---- persisted bookkeeping ----------------------------------------------------
 
     private fun deviceId(context: Context): String {
@@ -380,18 +501,39 @@ object SelfHostedSync {
                 logError(e)
             }
         }
+        val pending = HashMap<String, Pending>()
+        prefs.getString("pending", null)?.let { stored ->
+            try {
+                val json = JSONObject(stored)
+                json.keys().forEach { k ->
+                    val o = json.getJSONObject(k)
+                    pending[k] = Pending(
+                        if (o.isNull("v")) null else o.getString("v"),
+                        o.getLong("t"),
+                    )
+                }
+            } catch (e: Exception) {
+                logError(e)
+            }
+        }
         return Meta(
             prefs.getLong("cursor", 0L),
             prefs.getLong("clock_offset", 0L),
             prefs.getBoolean("bootstrapped", false),
             keys,
+            pending,
         ).also { meta = it }
     }
 
     private fun saveMeta(context: Context, state: Meta) {
         val json = JSONObject()
         state.keys.forEach { (k, v) -> json.put(k, "${v.hash}:${v.ts}") }
+        val pending = JSONObject()
+        state.pending.forEach { (k, v) ->
+            pending.put(k, JSONObject().put("v", v.value ?: JSONObject.NULL).put("t", v.ts))
+        }
         metaPrefs(context).edit()
+            .putString("pending", pending.toString())
             .putLong("cursor", state.cursor)
             .putLong("clock_offset", state.clockOffset)
             .putBoolean("bootstrapped", state.bootstrapped)
