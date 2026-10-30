@@ -1,0 +1,31 @@
+name: Sync upstream
+
+# Manual: merges recloudstream/cloudstream master into fork-main and resets the version base.
+# After a successful sync the fork version becomes the upstream version again (no suffix).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fork-main
+
+      - name: Merge upstream and reset base
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/recloudstream/cloudstream.git
+          git fetch upstream master
+          git merge --no-edit upstream/master
+          echo "$(git rev-parse upstream/master)" > fork-base.txt
+          git add fork-base.txt
+          git commit -m "chore: sync upstream and reset fork version base" || echo "nothing to commit"
+          git push origin fork-main
