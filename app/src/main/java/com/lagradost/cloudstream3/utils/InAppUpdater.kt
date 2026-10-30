@@ -38,7 +38,7 @@ import java.io.IOException
 import java.io.InputStreamReader
 
 object InAppUpdater {
-    private const val GITHUB_USER_NAME = "recloudstream"
+    private const val GITHUB_USER_NAME = "erdodo"
     private const val GITHUB_REPO = "cloudstream"
 
     private const val PRERELEASE_PACKAGE_NAME = "com.lagradost.cloudstream3.prerelease"
@@ -159,7 +159,8 @@ object InAppUpdater {
             app.get(releaseUrl, headers = headers).text
         ).toList()
 
-        val found = response.lastOrNull { rel ->
+        // The fork publishes one prerelease per build (newest first), upstream only a rolling one.
+        val found = response.firstOrNull { rel ->
             rel.prerelease || rel.tagName == "pre-release"
         }
 

@@ -78,3 +78,9 @@ jobs:
             --title "CloudStream $V" \
             --notes "Fork build $V (signed with the fork key). Commit: $GITHUB_SHA" \
           || gh release upload "v$V" "$APK" --clobber
+
+      - name: Move pre-release tag to this commit (used by the in-app updater)
+        if: env.SIGNED == 'true'
+        run: |
+          git tag -f pre-release "$GITHUB_SHA"
+          git push -f origin refs/tags/pre-release

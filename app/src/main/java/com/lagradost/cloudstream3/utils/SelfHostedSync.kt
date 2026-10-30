@@ -52,6 +52,7 @@ object SelfHostedSync {
     private const val MAX_PUSH_ENTRIES = 500
     private const val MAX_PUSH_CHARS = 3_000_000
     private const val DELETED = "-"
+    private val URL_PATTERN = Regex("^https?://[^/\\s]+(/.*)?$")
 
     private val JSON_TYPE = "application/json".toMediaType()
     private val client = OkHttpClient.Builder()
@@ -125,7 +126,7 @@ object SelfHostedSync {
             while (isActive) {
                 try {
                     val cfg = getConfig(appContext)
-                    if (cfg.enabled && cfg.url.startsWith("http") && cfg.token.isNotEmpty()) {
+                    if (cfg.enabled && URL_PATTERN.matches(cfg.url) && cfg.token.isNotEmpty()) {
                         syncOnce(appContext, cfg)
                         reconcilePlugins(appContext)
                     } else {
