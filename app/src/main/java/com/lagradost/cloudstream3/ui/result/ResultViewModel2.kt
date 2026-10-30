@@ -1,5 +1,7 @@
 package com.lagradost.cloudstream3.ui.result
 
+import com.lagradost.cloudstream3.utils.ProviderHealth
+import com.lagradost.cloudstream3.ui.search.SearchMerge
 import android.app.Activity
 import android.content.Context
 import android.content.DialogInterface
@@ -2657,11 +2659,35 @@ class ResultViewModel2 : ViewModel() {
                 return@ioSafe
             }
 
-            val validUrl = validUrlResource.value
-            val repo = APIRepository(api)
+            var validUrl = validUrlResource.value
+            var repo = APIRepository(api)
             currentRepo = repo
 
-            when (val data = repo.load(validUrl)) {
+            var loaded = repo.load(validUrl)
+            if (loaded is Resource.Failure) {
+                // The same title may exist in other providers (merged in search): fall back to
+                // those, fastest first, instead of showing an error.
+                val fallbacks = SearchMerge.alternativesOf(url)
+                    .filter { !ProviderHealth.isDisabled(it.apiName) }
+                    .sortedBy {
+                        ProviderHealth.latencyMs(it.apiName) ?: SearchMerge.UNKNOWN_SPEED_MS
+                    }
+                for (alternative in fallbacks) {
+                    val alternativeApi = APIHolder.getApiFromNameNull(alternative.apiName)
+                        ?: continue
+                    val alternativeRepo = APIRepository(alternativeApi)
+                    val result = alternativeRepo.load(alternative.url)
+                    if (result is Resource.Success) {
+                        loaded = result
+                        repo = alternativeRepo
+                        validUrl = alternative.url
+                        currentRepo = alternativeRepo
+                        break
+                    }
+                }
+            }
+
+            when (val data = loaded) {
                 is Resource.Failure -> {
                     _page.postValue(data)
                 }
@@ -2682,7 +2708,7 @@ class ResultViewModel2 : ViewModel() {
                         DOWNLOAD_HEADER_CACHE,
                         mainId.toString(),
                         DownloadObjects.DownloadHeaderCached(
-                            apiName = apiName,
+                            apiName = repo.name,
                             url = validUrl,
                             type = loadResponse.type,
                             name = loadResponse.name,

@@ -165,4 +165,8 @@
     <string name="self_sync_url_hint">http://server.local:8787</string>
     <string name="self_sync_token_hint">Access token</string>
     <string name="self_sync_enabled">Sync enabled</string>
+    <string name="health_auto_title">Auto-disable broken extensions</string>
+    <string name="health_auto_on">On: tests run every 6 hours, failing providers are turned off and turned on again when they work</string>
+    <string name="health_auto_off">Off: all providers stay active</string>
+    <string name="health_run_title">Test extensions now</string>
 </resources>

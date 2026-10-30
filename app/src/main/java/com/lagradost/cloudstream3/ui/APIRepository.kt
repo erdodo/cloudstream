@@ -20,9 +20,13 @@ import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.utils.Coroutines.atomicListOf
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.ConcurrentHashMap
 
 class APIRepository(val api: MainAPI) {
     companion object {
@@ -55,6 +59,30 @@ class APIRepository(val api: MainAPI) {
             val hash: Pair<String, String>
         )
 
+        /**
+         * Stale-while-revalidate cache for home pages and search results: a fresh entry is
+         * returned as is, a stale one is returned immediately and refreshed in the background.
+         */
+        private class Timed<T>(val value: T, val time: Long = unixTimeMS)
+
+        private const val MAIN_FRESH_MS = 5 * 60_000L
+        private const val MAIN_STALE_MS = 6 * 60 * 60_000L
+        private const val SEARCH_FRESH_MS = 5 * 60_000L
+        private const val SEARCH_STALE_MS = 60 * 60_000L
+        private const val MAX_CACHE_ENTRIES = 200
+
+        private val mainPageCache = ConcurrentHashMap<String, Timed<List<HomePageResponse?>>>()
+        private val searchCache = ConcurrentHashMap<String, Timed<SearchResponseList>>()
+        private val refreshing = ConcurrentHashMap.newKeySet<String>()
+        private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        private fun <T> ConcurrentHashMap<String, Timed<T>>.put(key: String, value: T) {
+            if (size >= MAX_CACHE_ENTRIES) {
+                entries.minByOrNull { it.value.time }?.key?.let { remove(it) }
+            }
+            this[key] = Timed(value)
+        }
+
         private val cache = atomicListOf<SavedLoadResponse>()
         private var cacheIndex: Int = 0
         const val CACHE_SIZE = 20
@@ -67,6 +95,8 @@ class APIRepository(val api: MainAPI) {
     private fun afterPluginsLoaded(forceReload: Boolean) {
         if (forceReload) {
             cache.clear()
+            mainPageCache.clear()
+            searchCache.clear()
         }
     }
 
@@ -92,8 +122,8 @@ class APIRepository(val api: MainAPI) {
                 val cached = cache.withLock {
                     var found: LoadResponse? = null
                     for (item in cache) {
-                        // 10 min save
-                        if (item.hash == lookingForHash && (unixTime - item.unixTime) < 60 * 10) {
+                        // 30 min save
+                        if (item.hash == lookingForHash && (unixTime - item.unixTime) < 60 * 30) {
                             found = item.response
                             break
                         }
@@ -124,6 +154,30 @@ class APIRepository(val api: MainAPI) {
         if (query.isEmpty())
             return Resource.Success(newSearchResponseList(emptyList()))
 
+        val key = "${api.name}|$query|$page"
+        searchCache[key]?.let { hit ->
+            val age = unixTimeMS - hit.time
+            if (age < SEARCH_STALE_MS) {
+                if (age >= SEARCH_FRESH_MS && refreshing.add("s|$key")) {
+                    refreshScope.launch {
+                        try {
+                            (fetchSearch(query, page) as? Resource.Success)
+                                ?.let { searchCache.put(key, it.value) }
+                        } finally {
+                            refreshing.remove("s|$key")
+                        }
+                    }
+                }
+                return Resource.Success(hit.value)
+            }
+        }
+
+        return fetchSearch(query, page).also { result ->
+            if (result is Resource.Success) searchCache.put(key, result.value)
+        }
+    }
+
+    private suspend fun fetchSearch(query: String, page: Int): Resource<SearchResponseList> {
         return safeApiCall {
             withTimeout(getTimeout(api.searchTimeoutMs)) {
                 (api.search(query, page)
@@ -153,7 +207,44 @@ class APIRepository(val api: MainAPI) {
         delay(delta)
     }
 
-    suspend fun getMainPage(page: Int, nameIndex: Int? = null): Resource<List<HomePageResponse?>> {
+    /**
+     * @param useCache serve a cached home page (and refresh it in the background if it is
+     * getting old). Pass false for an explicit refresh; the fetched page still updates the cache.
+     */
+    suspend fun getMainPage(
+        page: Int,
+        nameIndex: Int? = null,
+        useCache: Boolean = false,
+    ): Resource<List<HomePageResponse?>> {
+        val key = "${api.name}|$page|$nameIndex"
+        if (useCache) {
+            mainPageCache[key]?.let { hit ->
+                val age = unixTimeMS - hit.time
+                if (age < MAIN_STALE_MS) {
+                    if (age >= MAIN_FRESH_MS && refreshing.add("m|$key")) {
+                        refreshScope.launch {
+                            try {
+                                (fetchMainPage(page, nameIndex) as? Resource.Success)
+                                    ?.let { mainPageCache.put(key, it.value) }
+                            } finally {
+                                refreshing.remove("m|$key")
+                            }
+                        }
+                    }
+                    return Resource.Success(hit.value)
+                }
+            }
+        }
+
+        return fetchMainPage(page, nameIndex).also { result ->
+            if (result is Resource.Success) mainPageCache.put(key, result.value)
+        }
+    }
+
+    private suspend fun fetchMainPage(
+        page: Int,
+        nameIndex: Int?
+    ): Resource<List<HomePageResponse?>> {
         return safeApiCall {
             withTimeout(getTimeout(api.getMainPageTimeoutMs)) {
                 api.lastHomepageRequest = unixTimeMS

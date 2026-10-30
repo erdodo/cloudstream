@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.amap
 import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.utils.ProviderHealth
 import com.lagradost.cloudstream3.mvvm.debugAssert
 import com.lagradost.cloudstream3.mvvm.debugWarning
 import com.lagradost.cloudstream3.mvvm.launchSafe
@@ -192,7 +193,12 @@ class SearchViewModel : ViewModel() {
             index++
         }
 
-        return ExpandableSearchList(list, 1, false)
+        // The same title often exists in several providers: show it once, via the fastest one.
+        val merged = SearchMerge.merge(list) { providerName ->
+            if (ProviderHealth.isDisabled(providerName)) Long.MAX_VALUE
+            else ProviderHealth.latencyMs(providerName) ?: SearchMerge.UNKNOWN_SPEED_MS
+        }
+        return ExpandableSearchList(merged, 1, false)
     }
 
     private fun search(

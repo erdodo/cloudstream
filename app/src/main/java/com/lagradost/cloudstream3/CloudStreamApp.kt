@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import com.lagradost.cloudstream3.utils.ProviderHealth
 import com.lagradost.cloudstream3.utils.SelfHostedSync
 import android.os.Build
 import android.widget.Toast
@@ -88,6 +89,9 @@ class CloudStreamApp : Application(), SingletonImageLoader.Factory {
 
         // Pulls from the self-hosted server right away, then syncs every 10 seconds (if enabled).
         SelfHostedSync.start(this)
+
+        // Background speed pings and automatic provider health checks.
+        ProviderHealth.start(this)
     }
 
     override fun attachBaseContext(base: Context?) {

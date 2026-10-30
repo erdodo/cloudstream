@@ -15,6 +15,7 @@ import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import com.lagradost.cloudstream3.BuildConfig
 import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.utils.ProviderHealth
 import com.lagradost.cloudstream3.CommonActivity.activity
 import com.lagradost.cloudstream3.MainActivityScreen
 import com.lagradost.cloudstream3.R
@@ -71,6 +72,9 @@ object SettingsUpdatesScreen : SearchableSettings {
 
         val visualBackupPath by settings.backup.visualPath.collectAsState()
         var showDialog by remember { mutableStateOf(false) }
+        var healthAuto by remember {
+            mutableStateOf(ProviderHealth.isAutoDisableEnabled(CloudStreamApp.context!!))
+        }
 
         if (showDialog) {
             com.lagradost.cloudstream3.ui.settings.logcat.LogcatDialog {
@@ -210,6 +214,22 @@ object SettingsUpdatesScreen : SearchableSettings {
                             }
                         }
                     ),*/
+                    Preference.PreferenceItem.TextPreference(
+                        title = stringResource(R.string.health_auto_title),
+                        subtitle = if (healthAuto) stringResource(R.string.health_auto_on)
+                        else stringResource(R.string.health_auto_off),
+                        icon = painterResource(R.drawable.baseline_network_ping_24),
+                        onClick = {
+                            healthAuto = !healthAuto
+                            ProviderHealth.setAutoDisableEnabled(CloudStreamApp.context!!, healthAuto)
+                        }),
+                    Preference.PreferenceItem.TextPreference(
+                        title = stringResource(R.string.health_run_title),
+                        subtitle = ProviderHealth.lastSummary,
+                        icon = painterResource(R.drawable.baseline_network_ping_24),
+                        onClick = {
+                            ProviderHealth.runNow(CloudStreamApp.context!!)
+                        }),
                     Preference.PreferenceItem.TextPreference(
                         title = stringResource(R.string.test_extensions),
                         subtitle = stringResource(R.string.test_extensions_summary),

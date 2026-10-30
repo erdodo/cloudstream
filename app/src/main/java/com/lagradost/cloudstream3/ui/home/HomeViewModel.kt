@@ -57,6 +57,9 @@ import kotlinx.coroutines.withContext
 import java.util.EnumSet
 import java.util.concurrent.CopyOnWriteArrayList
 
+/** Providers whose home page was already loaded since this process started. */
+private val loadedHomeProviders = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
 class HomeViewModel : ViewModel() {
     companion object {
         suspend fun getResumeWatching(): List<DataStoreHelper.ResumeWatchingResult>? {
@@ -338,7 +341,10 @@ class HomeViewModel : ViewModel() {
         // cancel the current preview expand as that is no longer relevant
         addJob?.cancel()
 
-        when (val data = repo?.getMainPage(1, null)) {
+        // The first load of a provider after the app starts may come from the cache (instant
+        // home page); every later load is an explicit refresh and always hits the network.
+        val useCache = repo?.name?.let { loadedHomeProviders.add(it) } == true
+        when (val data = repo?.getMainPage(1, null, useCache)) {
             is Resource.Success -> {
                 try {
                     expandable.clear()
