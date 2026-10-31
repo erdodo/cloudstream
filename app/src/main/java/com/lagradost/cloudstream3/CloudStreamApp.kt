@@ -5,6 +5,10 @@ import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import com.lagradost.cloudstream3.utils.DeviceTier
+import com.lagradost.cloudstream3.ui.APIRepository
+import android.content.res.Configuration
+import android.content.ComponentCallbacks2
 import com.lagradost.cloudstream3.utils.ProviderHealth
 import com.lagradost.cloudstream3.utils.SelfHostedSync
 import android.os.Build
@@ -86,6 +90,29 @@ class CloudStreamApp : Application(), SingletonImageLoader.Factory {
         }
 
         AppDebug.isDebug = BuildConfig.DEBUG
+
+        // When the system runs short of memory (common on 2 GB TVs) give caches back instead of
+        // letting the device swap: decoded images and cached provider pages are rebuilt on demand.
+        registerComponentCallbacks(object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {
+                val weak = DeviceTier.isLowEnd(this@CloudStreamApp)
+                val threshold = if (weak) ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+                else ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+                if (level >= threshold) releaseCaches()
+            }
+
+            override fun onLowMemory() = releaseCaches()
+
+            override fun onConfigurationChanged(newConfig: Configuration) {}
+
+            private fun releaseCaches() {
+                try {
+                    SingletonImageLoader.get(this@CloudStreamApp).memoryCache?.clear()
+                } catch (_: Throwable) {
+                }
+                APIRepository.clearCaches()
+            }
+        })
 
         // Pulls from the self-hosted server right away, then syncs every 10 seconds (if enabled).
         SelfHostedSync.start(this)

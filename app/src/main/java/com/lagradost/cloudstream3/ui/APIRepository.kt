@@ -63,13 +63,17 @@ class APIRepository(val api: MainAPI) {
          * Stale-while-revalidate cache for home pages and search results: a fresh entry is
          * returned as is, a stale one is returned immediately and refreshed in the background.
          */
-        private class Timed<T>(val value: T, val time: Long = unixTimeMS)
+        // Soft reference: the system may drop cached pages itself when memory runs short.
+        private class Timed<T>(value: T, val time: Long = unixTimeMS) {
+            private val ref = java.lang.ref.SoftReference(value)
+            val value: T? get() = ref.get()
+        }
 
         private const val MAIN_FRESH_MS = 5 * 60_000L
         private const val MAIN_STALE_MS = 6 * 60 * 60_000L
         private const val SEARCH_FRESH_MS = 5 * 60_000L
         private const val SEARCH_STALE_MS = 60 * 60_000L
-        private const val MAX_CACHE_ENTRIES = 200
+        private const val MAX_CACHE_ENTRIES = 60
 
         private val mainPageCache = ConcurrentHashMap<String, Timed<List<HomePageResponse?>>>()
         private val searchCache = ConcurrentHashMap<String, Timed<SearchResponseList>>()
@@ -81,6 +85,13 @@ class APIRepository(val api: MainAPI) {
                 entries.minByOrNull { it.value.time }?.key?.let { remove(it) }
             }
             this[key] = Timed(value)
+        }
+
+        /** Drops every cached page; called when the system reports low memory. */
+        fun clearCaches() {
+            mainPageCache.clear()
+            searchCache.clear()
+            cache.clear()
         }
 
         private val cache = atomicListOf<SavedLoadResponse>()
@@ -156,6 +167,7 @@ class APIRepository(val api: MainAPI) {
 
         val key = "${api.name}|$query|$page"
         searchCache[key]?.let { hit ->
+            val cachedValue = hit.value ?: return@let
             val age = unixTimeMS - hit.time
             if (age < SEARCH_STALE_MS) {
                 if (age >= SEARCH_FRESH_MS && refreshing.add("s|$key")) {
@@ -168,7 +180,7 @@ class APIRepository(val api: MainAPI) {
                         }
                     }
                 }
-                return Resource.Success(hit.value)
+                return Resource.Success(cachedValue)
             }
         }
 
@@ -219,6 +231,7 @@ class APIRepository(val api: MainAPI) {
         val key = "${api.name}|$page|$nameIndex"
         if (useCache) {
             mainPageCache[key]?.let { hit ->
+                val cachedValue = hit.value ?: return@let
                 val age = unixTimeMS - hit.time
                 if (age < MAIN_STALE_MS) {
                     if (age >= MAIN_FRESH_MS && refreshing.add("m|$key")) {
@@ -231,7 +244,7 @@ class APIRepository(val api: MainAPI) {
                             }
                         }
                     }
-                    return Resource.Success(hit.value)
+                    return Resource.Success(cachedValue)
                 }
             }
         }

@@ -44,7 +44,9 @@ object ImageLoader {
             .diskCachePolicy(CachePolicy.ENABLED)
             .networkCachePolicy(CachePolicy.ENABLED)
             .memoryCache {
-                MemoryCache.Builder().maxSizePercent(context, 0.1)//10 % of heap for mem-cache
+                MemoryCache.Builder()
+                    // 10 % of the heap, 5 % on weak devices where memory is the bottleneck
+                    .maxSizePercent(context, if (DeviceTier.isLowEnd(context)) 0.05 else 0.1)
                     .strongReferencesEnabled(false)
                     .build()
             }
