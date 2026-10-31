@@ -409,6 +409,7 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
 
         val settingsManager = context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
         val isAdvancedSearch = settingsManager?.getBoolean("advanced_search", false) ?: false
+        searchViewModel.mergedListNeeded = !isAdvancedSearch
         val isSearchSuggestionsEnabled = settingsManager?.getBoolean("search_suggestions_enabled", true) ?: true
 
         selectedSearchTypes = DataStoreHelper.searchPreferenceTags.toMutableList()

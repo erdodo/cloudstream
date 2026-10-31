@@ -127,6 +127,13 @@ class SearchViewModel : ViewModel() {
         _searchSuggestions.postValue(emptyList())
     }
 
+    /**
+     * Set by the fragment: the merged list is only built when it is the list on screen
+     * (per-provider rows do not use it). Merging hundreds of titles is not free on a slow CPU.
+     */
+    @Volatile
+    var mergedListNeeded: Boolean = true
+
     private val lock: MutableSet<String> = mutableSetOf()
 
     // ExpandableHomepageList because the home adapter is reused in the search fragment
@@ -267,7 +274,12 @@ class SearchViewModel : ViewModel() {
                         LinkedHashMap(expandableSearches)
                     }
                     _currentSearch.postValue(snapshot)
-                    _searchResponse.postValue(Resource.Success(bundleSearch(snapshot)))
+                    _searchResponse.postValue(
+                        Resource.Success(
+                            if (mergedListNeeded) bundleSearch(snapshot)
+                            else ExpandableSearchList(emptyList(), 1, false) // only ends loading
+                        )
+                    )
                 }
 
                 coroutineScope {
