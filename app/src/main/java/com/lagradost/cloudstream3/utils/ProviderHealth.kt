@@ -41,7 +41,11 @@ object ProviderHealth {
     // Older/slower devices (32 bit TVs, about 2 GB RAM) check less often and one at a time.
     private var pingIntervalMs = 10 * 60_000L
     private var testIntervalMs = 6 * 60 * 60_000L
-    private var startDelayMs = 90_000L
+    private var startDelayMs = 30_000L
+
+    // The speed pings are light and feed the search ordering, so they start early; the heavy
+    // provider tests wait longer on weak devices.
+    private var testStartDelayMs = 90_000L
     private const val PING_TIMEOUT_MS = 8_000L
     private const val PING_PENALTY_MS = 30_000L
     private var pingParallelism = 4
@@ -97,7 +101,7 @@ object ProviderHealth {
         if (DeviceTier.isLowEnd(appContext)) {
             pingIntervalMs = 20 * 60_000L
             testIntervalMs = 24 * 60 * 60_000L
-            startDelayMs = 5 * 60_000L
+            testStartDelayMs = 5 * 60_000L
             pingParallelism = 2
             testParallelism = 1
         }
@@ -107,11 +111,14 @@ object ProviderHealth {
         job = scope.launch {
             delay(startDelayMs)
             var lastTest = prefs(appContext).getLong("last_test", 0L)
+            val testNotBefore = System.currentTimeMillis() + testStartDelayMs - startDelayMs
             while (isActive) {
                 try {
                     pingAll(appContext)
                     val due = System.currentTimeMillis() - lastTest >= testIntervalMs
-                    if (due && isAutoDisableEnabled(appContext)) {
+                    if (due && System.currentTimeMillis() >= testNotBefore &&
+                        isAutoDisableEnabled(appContext)
+                    ) {
                         runTests(appContext)
                         lastTest = System.currentTimeMillis()
                         prefs(appContext).edit().putLong("last_test", lastTest).apply()

@@ -261,7 +261,7 @@ class SearchViewModel : ViewModel() {
 
                 // A few at a time: every provider parses its own pages, doing all of them at once
                 // overloads the CPU and memory of a weak device and slows the UI down.
-                val gate = Semaphore(if (weak) 4 else 6)
+                val gate = Semaphore(if (weak) 6 else 8)
                 // One dead provider must not keep the whole search waiting.
                 val providerTimeoutMs = if (weak) 15_000L else 12_000L
                 // Results are shown as they arrive, but in batches instead of one list rebuild
