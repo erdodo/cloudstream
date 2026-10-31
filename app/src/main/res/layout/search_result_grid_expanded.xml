@@ -20,7 +20,7 @@
             android:layout_height="wrap_content"
             android:layout_margin="2dp"
             android:layout_marginBottom="2dp"
-            android:elevation="10dp"
+            android:elevation="@dimen/poster_elevation"
             app:cardBackgroundColor="?attr/primaryGrayBackground"
             app:cardCornerRadius="@dimen/rounded_image_radius"
             app:layout_constraintDimensionRatio="1:1.5"

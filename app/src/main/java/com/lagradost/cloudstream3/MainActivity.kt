@@ -142,6 +142,7 @@ import com.lagradost.cloudstream3.utils.BackPressedCallbackHelper.attachBackPres
 import com.lagradost.cloudstream3.utils.BackPressedCallbackHelper.detachBackPressedCallback
 import com.lagradost.cloudstream3.utils.BackupUtils.backup
 import com.lagradost.cloudstream3.utils.BackupUtils.setUpBackup
+import com.lagradost.cloudstream3.utils.DeviceTier
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.BiometricCallback
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.biometricPrompt
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.deviceHasPasswordPinLock
@@ -968,14 +969,24 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
         private fun setTargetPosition(target: FocusTarget) {
             focusOutline.get()?.apply {
-                layoutParams = layoutParams?.apply {
-                    width = target.width
-                    height = target.height
+                // Changing the layout params forces a layout pass, so only do it when the size
+                // really changes (moving between equally sized cards then costs nothing).
+                val params = layoutParams
+                if (params != null && (params.width != target.width || params.height != target.height)) {
+                    layoutParams = params.apply {
+                        width = target.width
+                        height = target.height
+                    }
                 }
 
                 translationX = target.x
                 translationY = target.y
-                bringToFront()
+
+                // bringToFront() re-orders and re-lays out; skip it when already on top.
+                val container = parent as? ViewGroup
+                if (container != null && container.indexOfChild(this) != container.childCount - 1) {
+                    bringToFront()
+                }
             }
         }
 
@@ -999,9 +1010,51 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
             }
         }
 
+        /** Focused poster cards grow a little; the outline follows the grown size. */
+        private const val FOCUS_SCALE = 1.06f
+        private const val FOCUS_SCALE_MS = 110L
+        private var scaledView: WeakReference<View> = WeakReference(null)
+
+        private fun isScalable(view: View): Boolean {
+            if (view !is CardView) return false
+            val root = view.rootView
+            // Poster sized cards only, never the full width hero banner.
+            return view.measuredWidth in 1..(root.width * 0.4f).toInt() &&
+                view.measuredHeight in 1..(root.height * 0.5f).toInt()
+        }
+
+        private fun applyFocusScale(newFocus: View?) {
+            val previous = scaledView.get()
+            val target = newFocus?.takeIf { isScalable(it) }
+            if (previous === target) return
+
+            previous?.animate()?.scaleX(1f)?.scaleY(1f)?.translationZ(0f)
+                ?.setDuration(FOCUS_SCALE_MS)?.start()
+
+            if (target != null) {
+                // A grown card would be cut off by the row that holds it.
+                var parent = target.parent
+                var levels = 0
+                while (parent is ViewGroup && levels < 4) {
+                    parent.clipChildren = false
+                    parent.clipToPadding = false
+                    parent = parent.parent
+                    levels++
+                }
+                target.animate()
+                    .scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
+                    .translationZ(8f * target.resources.displayMetrics.density)
+                    .setDuration(FOCUS_SCALE_MS)
+                    .setInterpolator(android.view.animation.DecelerateInterpolator())
+                    .start()
+            }
+            scaledView = WeakReference(target)
+        }
+
         @MainThread
         fun updateFocusView(newFocus: View?, same: Boolean = false) {
             val focusOutline = focusOutline.get() ?: return
+            applyFocusScale(newFocus)
             val lastView = lastFocus.get()
             val exactlyTheSame = lastView == newFocus && newFocus != null
             if (!exactlyTheSame) {
@@ -1076,6 +1129,13 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
                 newFocus.getLocationInWindow(out)
                 val (screenX, screenY) = out
                 var (x, y) = screenX.toFloat() to screenY.toFloat()
+                // getLocationInWindow includes the card's current scale: go back to its layout
+                // position, then grow to the size it is animating towards.
+                val growth = if (scaledView.get() === newFocus) FOCUS_SCALE else 1f
+                x += newFocus.measuredWidth * (newFocus.scaleX - 1f) / 2f
+                y += newFocus.measuredHeight * (newFocus.scaleY - 1f) / 2f
+                x -= newFocus.measuredWidth * (growth - 1f) / 2f
+                y -= newFocus.measuredHeight * (growth - 1f) / 2f
                 val (currentX, currentY) = focusOutline.translationX to focusOutline.translationY
 
                 if (!newFocus.isLtr()) {
@@ -1104,8 +1164,8 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
                 val end = FocusTarget(
                     x = x,
                     y = y,
-                    width = newFocus.measuredWidth,
-                    height = newFocus.measuredHeight
+                    width = (newFocus.measuredWidth * growth).toInt(),
+                    height = (newFocus.measuredHeight * growth).toInt()
                 )
 
                 // if they are the same within then snap, aka scrolling
@@ -1140,7 +1200,10 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
                 // animate between a and b
                 animator = ValueAnimator.ofFloat(0.0f, 1.0f).apply {
                     startDelay = 0
-                    duration = 200
+                    // Shorter on slow devices (fewer frames to drop), and an ease-out so the
+                    // outline settles on the item instead of stopping abruptly.
+                    duration = if (DeviceTier.isLowEnd(focusOutline.context)) 130L else 180L
+                    interpolator = android.view.animation.DecelerateInterpolator(1.6f)
                     addUpdateListener { animation ->
                         val animatedValue = animation.animatedValue as Float
                         val target = FocusTarget.lerp(last, current, minOf(animatedValue, 1.0f))

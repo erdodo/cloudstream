@@ -39,7 +39,7 @@ object ImageLoader {
     internal fun buildImageLoader(context: PlatformContext): ImageLoader {
         val isBrokenHardware = hasPotentialBrokenHardware()
         return ImageLoader.Builder(context)
-            .crossfade(200)
+            .crossfade(if (DeviceTier.isLowEnd(context)) 120 else 200)
             .allowHardware(SDK_INT >= 28 && !isBrokenHardware)
             .diskCachePolicy(CachePolicy.ENABLED)
             .networkCachePolicy(CachePolicy.ENABLED)

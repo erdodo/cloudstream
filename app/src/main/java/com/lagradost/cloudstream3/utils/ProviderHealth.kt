@@ -38,14 +38,15 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object ProviderHealth {
     private const val PREFS = "provider_health"
-    private const val PING_INTERVAL_MS = 10 * 60_000L
-    private const val TEST_INTERVAL_MS = 6 * 60 * 60_000L
-    private const val START_DELAY_MS = 90_000L
+    // Older/slower devices (32 bit TVs, about 2 GB RAM) check less often and one at a time.
+    private var pingIntervalMs = 10 * 60_000L
+    private var testIntervalMs = 6 * 60 * 60_000L
+    private var startDelayMs = 90_000L
     private const val PING_TIMEOUT_MS = 8_000L
     private const val PING_PENALTY_MS = 30_000L
-    private const val PING_PARALLELISM = 4
+    private var pingParallelism = 4
     private const val TEST_TIMEOUT_MS = 120_000L
-    private const val TEST_PARALLELISM = 3
+    private var testParallelism = 3
     private const val FAILS_TO_DISABLE = 2
 
     /** If more than this share of providers fail, assume the network is the problem. */
@@ -55,7 +56,7 @@ object ProviderHealth {
     private class State(var latencyMs: Long, var fails: Int, var disabled: Boolean)
 
     private val states = ConcurrentHashMap<String, State>()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + DeviceTier.backgroundDispatcher)
     private var job: Job? = null
     private var loaded = false
 
@@ -93,16 +94,23 @@ object ProviderHealth {
         val appContext = context.applicationContext
         if (job?.isActive == true) return
         load(appContext)
+        if (DeviceTier.isLowEnd(appContext)) {
+            pingIntervalMs = 20 * 60_000L
+            testIntervalMs = 24 * 60 * 60_000L
+            startDelayMs = 5 * 60_000L
+            pingParallelism = 2
+            testParallelism = 1
+        }
         afterPluginsLoadedEvent -= onPluginsLoaded
         afterPluginsLoadedEvent += onPluginsLoaded
 
         job = scope.launch {
-            delay(START_DELAY_MS)
+            delay(startDelayMs)
             var lastTest = prefs(appContext).getLong("last_test", 0L)
             while (isActive) {
                 try {
                     pingAll(appContext)
-                    val due = System.currentTimeMillis() - lastTest >= TEST_INTERVAL_MS
+                    val due = System.currentTimeMillis() - lastTest >= testIntervalMs
                     if (due && isAutoDisableEnabled(appContext)) {
                         runTests(appContext)
                         lastTest = System.currentTimeMillis()
@@ -113,7 +121,7 @@ object ProviderHealth {
                 } catch (e: Exception) {
                     logError(e)
                 }
-                delay(PING_INTERVAL_MS)
+                delay(pingIntervalMs)
             }
         }
     }
@@ -138,7 +146,7 @@ object ProviderHealth {
 
     private suspend fun pingAll(context: Context) {
         val apis = APIHolder.allProviders.withLock { APIHolder.allProviders.toList() }
-        val gate = Semaphore(PING_PARALLELISM)
+        val gate = Semaphore(pingParallelism)
         apis.map { api ->
             scope.async {
                 gate.withPermit { pingOne(api) }
@@ -185,7 +193,7 @@ object ProviderHealth {
         val apis = APIHolder.allProviders.withLock { APIHolder.allProviders.toList() }
         if (apis.isEmpty()) return
 
-        val gate = Semaphore(TEST_PARALLELISM)
+        val gate = Semaphore(testParallelism)
         val results = apis.map { api ->
             scope.async {
                 gate.withPermit {

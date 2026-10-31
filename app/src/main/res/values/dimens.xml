@@ -19,6 +19,8 @@
     <dimen name="navbar_width">0dp</dimen>
 
     <dimen name="nav_view_height">70dp</dimen>
+    <!-- Shadow under poster cards; real TVs (values-television) draw none, it is costly there. -->
+    <dimen name="poster_elevation">10dp</dimen>
     <dimen name="nav_rail_view_width">62dp</dimen>
 
     <dimen name="download_size">50dp</dimen>

@@ -33,7 +33,7 @@
             android:id="@+id/background_card"
             android:layout_width="114dp"
             android:layout_height="180dp"
-            android:elevation="10dp"
+            android:elevation="@dimen/poster_elevation"
             app:cardBackgroundColor="?attr/primaryGrayBackground"
             app:cardCornerRadius="@dimen/rounded_image_radius">
 

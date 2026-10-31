@@ -52,6 +52,8 @@ object SelfHostedSync {
     private const val MAX_PUSH_ENTRIES = 500
     private const val MAX_PUSH_CHARS = 3_000_000
     private const val DELETED = "-"
+    private const val FULL_SCAN_INTERVAL_MS = 10 * 60_000L
+    private const val PLUGIN_CHECK_INTERVAL_MS = 60_000L
     private val URL_PATTERN = Regex("^https?://[^/\\s]+(/.*)?$")
 
     private val JSON_TYPE = "application/json".toMediaType()
@@ -61,7 +63,7 @@ object SelfHostedSync {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + DeviceTier.backgroundDispatcher)
     private var job: Job? = null
 
     /** Human readable state for the settings dialog. */
@@ -92,6 +94,31 @@ object SelfHostedSync {
 
     private var meta: Meta? = null
 
+    // Only keys that changed since the last cycle are encoded and compared. A full scan is the
+    // safety net (first run, cleared prefs, every FULL_SCAN_INTERVAL_MS).
+    private val dirtyKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile
+    private var fullScanDue = true
+    private var lastFullScan = 0L
+    private var lastPluginCheck = 0L
+    private var lastSavedSignature = 0L
+    private var listenersInstalled = false
+
+    private val dataListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == null) fullScanDue = true else dirtyKeys.add("d:$key")
+    }
+    private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == null) fullScanDue = true else dirtyKeys.add("s:$key")
+    }
+
+    private fun installListeners(context: Context) {
+        if (listenersInstalled) return
+        listenersInstalled = true
+        context.getSharedPrefs().registerOnSharedPreferenceChangeListener(dataListener)
+        context.getDefaultSharedPrefs().registerOnSharedPreferenceChangeListener(settingsListener)
+    }
+
     data class Config(val url: String, val token: String, val enabled: Boolean)
 
     private fun configPrefs(context: Context): SharedPreferences =
@@ -121,6 +148,7 @@ object SelfHostedSync {
     /** (Re)starts the loop. Safe to call repeatedly. */
     fun start(context: Context) {
         val appContext = context.applicationContext
+        installListeners(appContext)
         job?.cancel()
         job = scope.launch {
             while (isActive) {
@@ -228,13 +256,56 @@ object SelfHostedSync {
     // ---- push ---------------------------------------------------------------------
 
     private fun push(context: Context, cfg: Config, state: Meta, deviceId: String) {
+        val nowMs = System.currentTimeMillis()
+        val full = fullScanDue || nowMs - lastFullScan >= FULL_SCAN_INTERVAL_MS
+        val pluginsDue = full || nowMs - lastPluginCheck >= PLUGIN_CHECK_INTERVAL_MS
+        val dirty: Set<String> =
+            if (full) emptySet() else dirtyKeys.toSet().also { dirtyKeys.removeAll(it) }
+        if (!full && dirty.isEmpty() && !pluginsDue) return
+
+        try {
+            pushChanges(context, cfg, state, deviceId, full, pluginsDue, dirty)
+            if (full) {
+                fullScanDue = false
+                lastFullScan = nowMs
+            }
+            if (pluginsDue) lastPluginCheck = nowMs
+        } catch (e: Exception) {
+            // Nothing is lost: look at the same keys again next cycle.
+            dirtyKeys.addAll(dirty)
+            if (full) fullScanDue = true
+            throw e
+        }
+    }
+
+    private fun pushChanges(
+        context: Context,
+        cfg: Config,
+        state: Meta,
+        deviceId: String,
+        full: Boolean,
+        pluginsDue: Boolean,
+        dirty: Set<String>,
+    ) {
         val now = System.currentTimeMillis() + state.clockOffset
         val local = HashMap<String, String>()
-        readLocal(context).forEach { (k, v) -> encode(v)?.let { local[k] = it } }
-        local.putAll(localPluginEntries(context))
+        if (full) {
+            readLocal(context).forEach { (k, v) -> encode(v)?.let { local[k] = it } }
+        } else if (dirty.isNotEmpty()) {
+            val dataAll = context.getSharedPrefs().all
+            val settingsAll = context.getDefaultSharedPrefs().all
+            for (key in dirty) {
+                val name = key.substring(2)
+                val value = (if (key.startsWith("d:")) dataAll else settingsAll)[name]
+                if (value != null && BackupUtils.isTransferableKey(name)) {
+                    encode(value)?.let { local[key] = it }
+                }
+            }
+        }
+        if (pluginsDue) local.putAll(localPluginEntries(context))
+
         val outgoing = ArrayList<Entry>()
         val newStates = HashMap<String, KeyState>()
-
         for ((key, encoded) in local) {
             val h = hash(encoded)
             if (state.keys[key]?.hash != h) {
@@ -242,7 +313,14 @@ object SelfHostedSync {
                 newStates[key] = KeyState(h, now)
             }
         }
-        for ((key, known) in state.keys) {
+
+        // Which known keys might have disappeared?
+        val candidates: Collection<String> = when {
+            full -> state.keys.keys.toList()
+            else -> dirty + (if (pluginsDue) state.keys.keys.filter { it.startsWith("p:") } else emptyList())
+        }
+        for (key in candidates) {
+            val known = state.keys[key] ?: continue
             // A plugin counts as present as long as its file exists, even if its repository
             // is not (yet) in the local repository list.
             val present = if (key.startsWith("p:")) pluginFile(context, key)?.exists() == true
@@ -527,6 +605,11 @@ object SelfHostedSync {
     }
 
     private fun saveMeta(context: Context, state: Meta) {
+        // Cheap fingerprint: skip serialising thousands of keys when nothing changed.
+        var signature = state.cursor * 31 + state.keys.size * 17L + state.pending.size
+        for ((k, v) in state.keys) signature += v.ts xor v.hash.hashCode().toLong() xor k.hashCode().toLong()
+        if (signature == lastSavedSignature) return
+        lastSavedSignature = signature
         val json = JSONObject()
         state.keys.forEach { (k, v) -> json.put(k, "${v.hash}:${v.ts}") }
         val pending = JSONObject()
