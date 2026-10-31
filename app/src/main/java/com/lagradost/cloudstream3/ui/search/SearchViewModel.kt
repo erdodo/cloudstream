@@ -21,6 +21,14 @@ import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
 import com.lagradost.cloudstream3.utils.DataStoreHelper.currentAccount
 import kotlinx.coroutines.Dispatchers
+import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.utils.DeviceTier
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -235,26 +243,66 @@ class SearchViewModel : ViewModel() {
             lastQuery = query
 
             withContext(Dispatchers.IO) { // This interrupts UI otherwise
-                repos.filter { a ->
-                    (ignoreSettings || (providersActive.isEmpty() || providersActive.contains(a.name))) && (!isQuickSearch || a.hasQuickSearch)
-                }.amap { a -> // Parallel
-                    val search = if (isQuickSearch) a.quickSearch(query) else a.search(query, 1)
-                    if (currentSearchIndex != currentIndex) return@amap
-                    if (search is Resource.Success) {
-                        val searchValue = search.value
-                        expandableSearches[a.name] =
-                            ExpandableSearchList(searchValue.items, 1, searchValue.hasNext)
+                val weak = CloudStreamApp.context?.let { DeviceTier.isLowEnd(it) } ?: false
+
+                // Fastest providers first (measured by ProviderHealth), disabled ones skipped.
+                val selected = repos.filter { a ->
+                    (ignoreSettings || (providersActive.isEmpty() || providersActive.contains(a.name))) &&
+                        (!isQuickSearch || a.hasQuickSearch) &&
+                        !ProviderHealth.isDisabled(a.name)
+                }.sortedBy { ProviderHealth.latencyMs(it.name) ?: SearchMerge.UNKNOWN_SPEED_MS }
+
+                // A few at a time: every provider parses its own pages, doing all of them at once
+                // overloads the CPU and memory of a weak device and slows the UI down.
+                val gate = Semaphore(if (weak) 4 else 6)
+                // One dead provider must not keep the whole search waiting.
+                val providerTimeoutMs = if (weak) 15_000L else 12_000L
+                // Results are shown as they arrive, but in batches instead of one list rebuild
+                // per provider.
+                val publishEveryMs = if (weak) 500L else 300L
+                val changed = AtomicBoolean(false)
+
+                fun publish() {
+                    val snapshot = synchronized(expandableSearches) {
+                        LinkedHashMap(expandableSearches)
+                    }
+                    _currentSearch.postValue(snapshot)
+                    _searchResponse.postValue(Resource.Success(bundleSearch(snapshot)))
+                }
+
+                coroutineScope {
+                    val publisher = launch {
+                        while (isActive) {
+                            delay(publishEveryMs)
+                            if (currentSearchIndex != currentIndex) return@launch
+                            if (changed.getAndSet(false)) publish()
+                        }
                     }
 
-                    _currentSearch.postValue(expandableSearches)
+                    selected.amap { a -> // Parallel, limited by the gate
+                        gate.withPermit {
+                            if (currentSearchIndex != currentIndex) return@withPermit
+                            val search = withTimeoutOrNull(providerTimeoutMs) {
+                                if (isQuickSearch) a.quickSearch(query) else a.search(query, 1)
+                            }
+                            if (currentSearchIndex != currentIndex) return@withPermit
+                            if (search is Resource.Success) {
+                                val searchValue = search.value
+                                synchronized(expandableSearches) {
+                                    expandableSearches[a.name] =
+                                        ExpandableSearchList(searchValue.items, 1, searchValue.hasNext)
+                                }
+                                changed.set(true)
+                            }
+                        }
+                    }
+                    publisher.cancel()
                 }
 
                 if (currentSearchIndex != currentIndex) return@withContext // this should prevent rewrite of existing data bug
 
-                _currentSearch.postValue(expandableSearches)
-                val list = bundleSearch(expandableSearches)
-
-                _searchResponse.postValue(Resource.Success(list))
+                // Final state, also covers "nothing found".
+                publish()
             }
         }
 }

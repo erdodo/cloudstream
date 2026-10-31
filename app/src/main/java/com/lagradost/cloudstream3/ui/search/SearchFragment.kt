@@ -408,7 +408,7 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
         }
 
         val settingsManager = context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
-        val isAdvancedSearch = settingsManager?.getBoolean("advanced_search", true) ?: true
+        val isAdvancedSearch = settingsManager?.getBoolean("advanced_search", false) ?: false
         val isSearchSuggestionsEnabled = settingsManager?.getBoolean("search_suggestions_enabled", true) ?: true
 
         selectedSearchTypes = DataStoreHelper.searchPreferenceTags.toMutableList()
@@ -470,7 +470,8 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
                 is Resource.Success -> {
                     it.value.let { data ->
                         val list = data.list
-                        if (list.isNotEmpty()) {
+                        // The per-provider rows are built from currentSearch instead.
+                        if (list.isNotEmpty() && !isAdvancedSearch) {
                             (binding.searchAutofitResults.adapter as? SearchAdapter)?.submitList(
                                 list
                             )
@@ -495,6 +496,8 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
 
         val listLock = ReentrantLock()
         observe(searchViewModel.currentSearch) { list ->
+            // The merged grid is built from searchResponse instead.
+            if (!isAdvancedSearch) return@observe
             try {
                 // https://stackoverflow.com/questions/6866238/concurrent-modification-exception-adding-to-an-arraylist
                 listLock.lock()

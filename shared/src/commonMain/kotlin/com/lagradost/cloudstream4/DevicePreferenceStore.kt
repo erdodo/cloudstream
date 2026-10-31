@@ -72,8 +72,10 @@ class UIPreferences(preferences: PreferenceStore) {
     val bottomTitle = preferences.getBoolean(
         "bottom_title_key", true
     )
+    // Off by default in this fork: one merged list (same title once, fastest provider) is
+    // quicker to read and cheaper to build than a row per provider.
     val advancedSearch = preferences.getBoolean(
-        "advanced_search", true
+        "advanced_search", false
     )
     val searchSuggestions = preferences.getBoolean(
         "search_suggestions_enabled", true
