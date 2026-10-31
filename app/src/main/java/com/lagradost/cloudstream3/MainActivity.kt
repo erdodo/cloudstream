@@ -1025,10 +1025,12 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
         private fun applyFocusScale(newFocus: View?) {
             val previous = scaledView.get()
-            val target = newFocus?.takeIf { isScalable(it) }
+            // Growing a card means re-drawing it every frame: fine on a phone or tablet, but a
+            // 4K output on a weak TV chip drops to about 30 fps, so it is skipped there.
+            val target = newFocus?.takeIf { isScalable(it) && !DeviceTier.isLowEnd(it.context) }
             if (previous === target) return
 
-            previous?.animate()?.scaleX(1f)?.scaleY(1f)?.translationZ(0f)
+            previous?.animate()?.scaleX(1f)?.scaleY(1f)
                 ?.setDuration(FOCUS_SCALE_MS)?.start()
 
             if (target != null) {
@@ -1043,7 +1045,6 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
                 }
                 target.animate()
                     .scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
-                    .translationZ(8f * target.resources.displayMetrics.density)
                     .setDuration(FOCUS_SCALE_MS)
                     .setInterpolator(android.view.animation.DecelerateInterpolator())
                     .start()

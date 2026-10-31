@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Screen transitions are shorter on TVs: fewer frames to draw on a weak chip. -->
+    <integer name="config_navAnimTime">150</integer>
+</resources>
