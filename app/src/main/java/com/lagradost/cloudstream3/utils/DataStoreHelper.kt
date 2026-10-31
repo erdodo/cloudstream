@@ -709,8 +709,28 @@ object DataStoreHelper {
      * Sets the position, duration, and resume data of an episode/movie,
      * If nextEpisode is not specified it will not be able to set the next episode as resumable if progress > NEXT_WATCH_EPISODE_PERCENTAGE
      */
-    fun setViewPosAndResume(id: Int?, position: Long, duration: Long, currentEpisode: Any?, nextEpisode: Any?) {
+    fun setViewPosAndResume(
+        id: Int?,
+        position: Long,
+        duration: Long,
+        currentEpisode: Any?,
+        nextEpisode: Any?,
+        // false when the caller does not know the next episode (external players), so a null
+        // next episode must not be read as "this was the last one".
+        nextEpisodeKnown: Boolean = true,
+    ) {
+        val parentId = when (currentEpisode) {
+            is ResultEpisode -> currentEpisode.parentId
+            is ExtractorUri -> currentEpisode.parentId
+            else -> null
+        }
+        // A first look shorter than a minute is not worth a place in the history.
+        if (!WatchHistoryRules.shouldRecord(position, getLastWatched(parentId) != null)) return
+
         setViewPos(id, position, duration)
+        if (parentId != null) {
+            updateFolderByProgress(parentId, position, duration, isLastEpisode = nextEpisodeKnown && nextEpisode == null)
+        }
         if (id != null) {
             when (val meta = currentEpisode) {
                 is ResultEpisode -> {
@@ -759,6 +779,44 @@ object DataStoreHelper {
                 }
             }
         }
+    }
+
+    /** Moves a title between the Watching and Completed folders by how much was watched. */
+    private fun updateFolderByProgress(
+        parentId: Int,
+        position: Long,
+        duration: Long,
+        isLastEpisode: Boolean,
+    ) {
+        if (duration <= 0) return
+        val current = getResultWatchState(parentId)
+        val target = WatchHistoryRules.targetFolder(
+            current, position, (position * 100L / duration).toInt(), isLastEpisode
+        ) ?: return
+
+        if (current == WatchType.NONE) {
+            // The library entry needs the title's details, kept when its page was opened.
+            val header = getKey<DownloadObjects.DownloadHeaderCached>(
+                DOWNLOAD_HEADER_CACHE, parentId.toString()
+            ) ?: return
+            val now = System.currentTimeMillis()
+            setBookmarkedData(
+                parentId,
+                BookmarkedData(
+                    bookmarkedTime = now,
+                    id = parentId,
+                    latestUpdatedTime = now,
+                    name = header.name,
+                    url = header.url,
+                    apiName = header.apiName,
+                    type = header.type,
+                    posterUrl = header.poster,
+                    year = null,
+                )
+            )
+        }
+        setResultWatchState(parentId, target.internalId)
+        AccountManager.localListApi.requireLibraryRefresh = true
     }
 
     fun getViewPos(id: Int?): PosDur? {

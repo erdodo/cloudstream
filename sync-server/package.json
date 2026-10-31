@@ -8,6 +8,11 @@
     "migrate": "node src/migrate.mjs",
     "create-user": "node src/create-user.mjs"
   },
-  "engines": { "node": ">=20" },
-  "dependencies": { "pg": "^8.13.0" }
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.13.0",
+    "ws": "^8.18.0"
+  }
 }

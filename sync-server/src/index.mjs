@@ -1,14 +1,31 @@
 // Sync protocol (all under /v1, JSON, Authorization: Bearer <token>)
+//   WS   /v1/ws                   -> push notifications: {"type":"changed","cursor":<seq>} whenever
+//                                    another device wrote; the client then pulls over HTTP.
+//                                    Optional header X-Device-Id (not notified about its own writes).
 //   GET  /v1/changes?since=<seq>  -> { now, cursor, more, entries: [{key,value,deleted,updatedAt,seq,deviceId}] }
 //   POST /v1/changes              -> body { deviceId, entries:[{key,value,deleted,updatedAt}] }
 //                                    -> { accepted, rejected } (LWW: stored only if newer)
 import { createServer } from "node:http";
+import { WebSocketServer } from "ws";
 import { createHash } from "node:crypto";
 import { pool } from "./db.mjs";
 
 const MAX_BODY = 5 * 1024 * 1024; // 5 MB per request
 const MAX_ENTRIES = 2000;
 const PORT = Number(process.env.PORT ?? 8787);
+
+/** Connected devices by user id: Map<userId, Set<{ws, deviceId}>> */
+const sockets = new Map();
+
+function broadcast(userId, message, exceptDeviceId) {
+  const group = sockets.get(userId);
+  if (!group) return;
+  const text = JSON.stringify(message);
+  for (const client of group) {
+    if (client.deviceId && client.deviceId === exceptDeviceId) continue;
+    if (client.ws.readyState === 1) client.ws.send(text);
+  }
+}
 
 function send(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -104,9 +121,14 @@ async function handlePost(userId, req, res) {
        updated_at = EXCLUDED.updated_at,
        device_id = EXCLUDED.device_id,
        seq = EXCLUDED.seq
-     WHERE sync_entries.updated_at < EXCLUDED.updated_at`,
+     WHERE sync_entries.updated_at < EXCLUDED.updated_at
+     RETURNING seq`,
     [userId, keys, values, deleted, times, body.deviceId],
   );
+  if (result.rowCount > 0) {
+    const cursor = Math.max(...result.rows.map((r) => Number(r.seq)));
+    broadcast(userId, { type: "changed", cursor }, body.deviceId);
+  }
   send(res, 200, { accepted: result.rowCount, rejected });
 }
 
@@ -128,5 +150,47 @@ const server = createServer(async (req, res) => {
     return send(res, 500, { error: "internal" });
   }
 });
+
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", async (req, socket, head) => {
+  try {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname !== "/v1/ws") return socket.destroy();
+    const userId = await authenticate(req);
+    if (userId === null) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      return socket.destroy();
+    }
+    const deviceId = String(req.headers["x-device-id"] ?? "");
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      const client = { ws, deviceId, alive: true };
+      if (!sockets.has(userId)) sockets.set(userId, new Set());
+      sockets.get(userId).add(client);
+      ws.on("pong", () => { client.alive = true; });
+      ws.on("close", () => {
+        const group = sockets.get(userId);
+        group?.delete(client);
+        if (group && group.size === 0) sockets.delete(userId);
+      });
+      ws.on("error", () => ws.terminate());
+      ws.send(JSON.stringify({ type: "hello", now: Date.now() }));
+    });
+  } catch (err) {
+    console.error(err);
+    socket.destroy();
+  }
+});
+
+// Drop connections whose device vanished (phone left the Wi-Fi, TV powered off...).
+setInterval(() => {
+  for (const group of sockets.values()) {
+    for (const client of group) {
+      if (!client.alive) { client.ws.terminate(); continue; }
+      client.alive = false;
+      client.ws.ping();
+    }
+  }
+}, 30_000).unref();
 
 server.listen(PORT, () => console.log(`sync server on :${PORT}`));

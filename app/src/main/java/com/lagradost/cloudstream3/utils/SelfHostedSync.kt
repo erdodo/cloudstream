@@ -3,7 +3,11 @@ package com.lagradost.cloudstream3.utils
 import android.content.Context
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
+import android.os.Handler
+import android.os.Looper
 import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.ui.result.ResultFragment
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.plugins.RepositoryManager
@@ -18,10 +22,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,7 +54,15 @@ import java.util.concurrent.TimeUnit
 object SelfHostedSync {
     private const val CONFIG_PREFS = "self_hosted_sync_config"
     private const val META_PREFS = "self_hosted_sync_meta"
+    /** Polling interval while there is no WebSocket (also the fallback for an older server). */
     private const val INTERVAL_MS = 10_000L
+
+    /** With a live WebSocket changes arrive as notifications; this is only a safety net. */
+    private const val SAFETY_POLL_MS = 60_000L
+
+    /** Lets a burst of local changes (a playing video saves its position often) become one push. */
+    private const val WAKE_DEBOUNCE_MS = 1_500L
+    private const val MIN_UI_REFRESH_MS = 2_000L
 
     /** Re-read a few entries behind the cursor; applying an entry twice is harmless. */
     private const val CURSOR_OVERLAP = 50L
@@ -105,11 +122,35 @@ object SelfHostedSync {
     private var lastSavedSignature = 0L
     private var listenersInstalled = false
 
+    // Real-time channel: the server tells us when another device wrote something.
+    private val wakeups = Channel<Unit>(Channel.CONFLATED)
+    private val wsClient: OkHttpClient by lazy {
+        client.newBuilder().readTimeout(0, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS).build()
+    }
+    @Volatile
+    private var wsConnected = false
+    private var socket: WebSocket? = null
+    private var socketKey: String? = null
+    private var nextSocketAttemptAt = 0L
+    private var socketFailures = 0
+
+    // Pulling is only needed when the server said so (or after a while); a local change only pushes.
+    @Volatile
+    private var pullRequested = true
+    private var lastPull = 0L
+
+    // Screens hold their own copy of watch progress and library; tell them when it changed.
+    @Volatile
+    private var uiRefreshNeeded = false
+    private var lastUiRefresh = 0L
+
     private val dataListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == null) fullScanDue = true else dirtyKeys.add("d:$key")
+        wakeups.trySend(Unit)
     }
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == null) fullScanDue = true else dirtyKeys.add("s:$key")
+        wakeups.trySend(Unit)
     }
 
     private fun installListeners(context: Context) {
@@ -155,9 +196,11 @@ object SelfHostedSync {
                 try {
                     val cfg = getConfig(appContext)
                     if (cfg.enabled && URL_PATTERN.matches(cfg.url) && cfg.token.isNotEmpty()) {
+                        ensureSocket(appContext, cfg)
                         syncOnce(appContext, cfg)
                         reconcilePlugins(appContext)
                     } else {
+                        closeSocket()
                         status = "Off"
                     }
                 } catch (e: CancellationException) {
@@ -168,9 +211,74 @@ object SelfHostedSync {
                     status = "Error: ${e.message}"
                     logError(e)
                 }
-                delay(INTERVAL_MS)
+                // A server notification or a local change wakes the loop at once; otherwise it
+                // polls (rarely when the WebSocket is up, every INTERVAL_MS when it is not).
+                withTimeoutOrNull(if (wsConnected) SAFETY_POLL_MS else INTERVAL_MS) {
+                    wakeups.receive()
+                }
+                delay(WAKE_DEBOUNCE_MS)
             }
         }
+    }
+
+    // ---- WebSocket ----------------------------------------------------------------
+
+    private fun closeSocket() {
+        socket?.close(1000, "closing")
+        socket = null
+        socketKey = null
+        wsConnected = false
+    }
+
+    private fun socketDown() {
+        wsConnected = false
+        socket = null
+        socketFailures++
+        // 2 s, 4 s, 8 s ... at most 5 minutes; an old server without WebSocket just keeps polling.
+        val backoff = minOf(5 * 60_000L, 2_000L shl minOf(socketFailures, 7))
+        nextSocketAttemptAt = System.currentTimeMillis() + backoff
+        wakeups.trySend(Unit)
+    }
+
+    private fun ensureSocket(context: Context, cfg: Config) {
+        val key = cfg.url + "|" + cfg.token
+        if (socketKey != null && socketKey != key) closeSocket() // address or token changed
+        if (socket != null) return
+        if (System.currentTimeMillis() < nextSocketAttemptAt) return
+
+        val request = Request.Builder()
+            .url(cfg.url.replaceFirst("http", "ws") + "/v1/ws") // http -> ws, https -> wss
+            .header("Authorization", "Bearer ${cfg.token}")
+            .header("X-Device-Id", deviceId(context))
+            .build()
+        socketKey = key
+        socket = wsClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                wsConnected = true
+                socketFailures = 0
+                pullRequested = true
+                wakeups.trySend(Unit) // catch up on whatever happened while we were away
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (text.contains("\"changed\"")) {
+                    pullRequested = true
+                    wakeups.trySend(Unit)
+                }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(1000, null)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (socket === webSocket) socketDown()
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (socket === webSocket) socketDown()
+            }
+        })
     }
 
     @Synchronized
@@ -187,9 +295,44 @@ object SelfHostedSync {
         }
 
         push(context, cfg, state, deviceId)
-        pull(context, cfg, state, unconditional = false)
+        val now = System.currentTimeMillis()
+        val pollEvery = if (wsConnected) SAFETY_POLL_MS else INTERVAL_MS
+        if (pullRequested || now - lastPull >= pollEvery) {
+            pullRequested = false
+            lastPull = now
+            try {
+                pull(context, cfg, state, unconditional = false)
+            } catch (e: Exception) {
+                pullRequested = true
+                throw e
+            }
+        }
         saveMeta(context, state)
-        status = "Synced ${java.text.DateFormat.getTimeInstance().format(java.util.Date())}"
+        status = (if (wsConnected) "Live " else "Synced ") +
+            java.text.DateFormat.getTimeInstance().format(java.util.Date())
+        refreshUiIfNeeded()
+    }
+
+    private fun isUiRelevant(prefKey: String): Boolean =
+        prefKey.contains("video_pos_dur") || prefKey.contains("result_resume_watching") ||
+            prefKey.contains("result_watch_state") || prefKey.contains("result_subscribed")
+
+    /** Watch progress or library changed on another device: make the open screens re-read it. */
+    private fun refreshUiIfNeeded() {
+        if (!uiRefreshNeeded) return
+        val now = System.currentTimeMillis()
+        if (now - lastUiRefresh < MIN_UI_REFRESH_MS) return
+        uiRefreshNeeded = false
+        lastUiRefresh = now
+        Handler(Looper.getMainLooper()).post {
+            try {
+                MainActivity.bookmarksUpdatedEvent(true)
+                MainActivity.reloadLibraryEvent(true)
+                ResultFragment.updateUI()
+            } catch (t: Throwable) {
+                logError(t)
+            }
+        }
     }
 
     // ---- local data ---------------------------------------------------------------
@@ -400,6 +543,9 @@ object SelfHostedSync {
                     o.getLong("updatedAt"),
                 )
             }
+            if (entries.isNotEmpty()) {
+                android.util.Log.d("SelfHostedSync", "pulled ${entries.size} entries (ws=$wsConnected)")
+            }
             applyRemote(context, state, entries, unconditional)
             state.cursor = maxOf(state.cursor, json.optLong("cursor", state.cursor))
             more = json.optBoolean("more", false)
@@ -436,6 +582,7 @@ object SelfHostedSync {
 
             if (entry.deleted || entry.value == null) {
                 scopeEditor.remove(prefKey)
+                if (isUiRelevant(prefKey)) uiRefreshNeeded = true
                 state.keys[entry.key] = KeyState(DELETED, entry.updatedAt)
             } else {
                 // Skip rewriting identical values.
@@ -443,6 +590,7 @@ object SelfHostedSync {
                 if (currentEncoded != entry.value) {
                     try {
                         applyValue(scopeEditor, prefKey, entry.value)
+                        if (isUiRelevant(prefKey)) uiRefreshNeeded = true
                     } catch (e: Exception) {
                         logError(e)
                         continue
