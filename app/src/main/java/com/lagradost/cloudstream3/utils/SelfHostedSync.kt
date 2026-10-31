@@ -65,7 +65,7 @@ object SelfHostedSync {
     private const val MIN_UI_REFRESH_MS = 2_000L
 
     /** Re-read a few entries behind the cursor; applying an entry twice is harmless. */
-    private const val CURSOR_OVERLAP = 50L
+    private const val CURSOR_OVERLAP = 20L
     private const val MAX_PUSH_ENTRIES = 500
     private const val MAX_PUSH_CHARS = 3_000_000
     private const val DELETED = "-"
@@ -543,8 +543,9 @@ object SelfHostedSync {
                     o.getLong("updatedAt"),
                 )
             }
-            if (entries.isNotEmpty()) {
-                android.util.Log.d("SelfHostedSync", "pulled ${entries.size} entries (ws=$wsConnected)")
+            val fresh = (0 until array.length()).count { array.getJSONObject(it).optLong("seq") > state.cursor }
+            if (fresh > 0) {
+                android.util.Log.d("SelfHostedSync", "pulled $fresh new entries (ws=$wsConnected)")
             }
             applyRemote(context, state, entries, unconditional)
             state.cursor = maxOf(state.cursor, json.optLong("cursor", state.cursor))
