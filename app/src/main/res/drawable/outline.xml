@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android" >
-    <stroke android:width="2dp"
+    <!-- Focus highlight: a faint fill plus a bold ring, readable from a sofa -->
+    <solid android:color="#1FFFFFFF" />
+    <stroke android:width="3dp"
             android:color="?attr/white"/>
     <corners
             android:bottomLeftRadius="@dimen/rounded_image_radius"

@@ -9,6 +9,7 @@
     <TextView
         android:id="@+id/home_child_more_info"
         style="@style/WatchHeaderText"
+        android:textSize="22sp"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginStart="@dimen/navbar_width"
