@@ -107,6 +107,7 @@ object SelfHostedSync {
         val value: String?,
         val deleted: Boolean,
         val updatedAt: Long,
+        val deviceId: String = "",
     )
 
     private var meta: Meta? = null
@@ -133,6 +134,19 @@ object SelfHostedSync {
     private var socketKey: String? = null
     private var nextSocketAttemptAt = 0L
     private var socketFailures = 0
+
+    // A phone that slept has a dead connection it does not know about yet. On return the
+    // connection is rebuilt and everything is pulled at once, before anything is opened.
+    @Volatile
+    private var backgroundedAt = 0L
+    @Volatile
+    private var urgent = false
+    private const val FOREGROUND_RECONNECT_AFTER_MS = 10_000L
+
+    // Keys this device wrote itself a moment ago (key -> time). While a device is playing it
+    // rewrites its position every second; a stale value from another device must not undo that.
+    private val ownWrites = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val OWN_WRITE_GUARD_MS = 20_000L
 
     // Pulling is only needed when the server said so (or after a while); a local change only pushes.
     @Volatile
@@ -216,13 +230,32 @@ object SelfHostedSync {
                 withTimeoutOrNull(if (wsConnected) SAFETY_POLL_MS else INTERVAL_MS) {
                     wakeups.receive()
                 }
-                delay(WAKE_DEBOUNCE_MS)
+                if (urgent) urgent = false else delay(WAKE_DEBOUNCE_MS)
             }
         }
     }
 
+    fun onBackground() {
+        backgroundedAt = System.currentTimeMillis()
+    }
+
+    /** The app is in front again (also after the screen was off). */
+    fun onForeground() {
+        val away = if (backgroundedAt > 0) System.currentTimeMillis() - backgroundedAt else 0L
+        backgroundedAt = 0
+        pullRequested = true
+        urgent = true
+        if (away > FOREGROUND_RECONNECT_AFTER_MS) {
+            closeSocket()
+            socketFailures = 0
+            nextSocketAttemptAt = 0
+        }
+        wakeups.trySend(Unit)
+    }
+
     // ---- WebSocket ----------------------------------------------------------------
 
+    @Synchronized
     private fun closeSocket() {
         socket?.close(1000, "closing")
         socket = null
@@ -230,6 +263,7 @@ object SelfHostedSync {
         wsConnected = false
     }
 
+    @Synchronized
     private fun socketDown() {
         wsConnected = false
         socket = null
@@ -240,6 +274,7 @@ object SelfHostedSync {
         wakeups.trySend(Unit)
     }
 
+    @Synchronized
     private fun ensureSocket(context: Context, cfg: Config) {
         val key = cfg.url + "|" + cfg.token
         if (socketKey != null && socketKey != key) closeSocket() // address or token changed
@@ -311,6 +346,17 @@ object SelfHostedSync {
         status = (if (wsConnected) "Live " else "Synced ") +
             java.text.DateFormat.getTimeInstance().format(java.util.Date())
         refreshUiIfNeeded()
+    }
+
+    /** Playback position in ms from an encoded "video_pos_dur" value, or null if it is not one. */
+    internal fun positionOf(encoded: String?): Long? {
+        if (encoded == null) return null
+        return try {
+            val pos = JSONObject(JSONObject(encoded).getString("v")).optLong("position", -1L)
+            if (pos >= 0) pos else null
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun isUiRelevant(prefKey: String): Boolean =
@@ -480,7 +526,11 @@ object SelfHostedSync {
         fun flush() {
             if (batch.isEmpty()) return
             postBatch(cfg, deviceId, batch)
-            batch.forEach { state.keys[it.key] = newStates.getValue(it.key) }
+            val pushedAt = System.currentTimeMillis()
+            batch.forEach {
+                state.keys[it.key] = newStates.getValue(it.key)
+                if (!it.deleted) ownWrites[it.key] = pushedAt
+            }
             batch = ArrayList()
             chars = 0
         }
@@ -541,6 +591,7 @@ object SelfHostedSync {
                     if (o.isNull("value")) null else o.getString("value"),
                     o.getBoolean("deleted"),
                     o.getLong("updatedAt"),
+                    o.optString("deviceId"),
                 )
             }
             val fresh = (0 until array.length()).count { array.getJSONObject(it).optLong("seq") > state.cursor }
@@ -581,6 +632,25 @@ object SelfHostedSync {
             val known = state.keys[entry.key]
             if (!unconditional && known != null && entry.updatedAt <= known.ts) continue
 
+            // Watch position of a film this device is playing right now: a copy from another
+            // device that is further back (it started from an old position) must not win just
+            // because it was written later. Keep ours and send it again with a fresh time.
+            if (!unconditional && !entry.deleted && entry.value != null &&
+                prefKey.contains("video_pos_dur") && entry.deviceId != deviceId(context)
+            ) {
+                val ownAt = ownWrites[entry.key]
+                if (ownAt != null && System.currentTimeMillis() - ownAt < OWN_WRITE_GUARD_MS) {
+                    val remotePos = positionOf(entry.value)
+                    val localPos = positionOf(localNow[entry.key]?.let { encode(it) })
+                    if (remotePos != null && localPos != null && remotePos < localPos) {
+                        state.keys[entry.key] = KeyState("", entry.updatedAt) // forces a push
+                        dirtyKeys.add(entry.key)
+                        wakeups.trySend(Unit)
+                        continue
+                    }
+                }
+            }
+
             if (entry.deleted || entry.value == null) {
                 scopeEditor.remove(prefKey)
                 if (isUiRelevant(prefKey)) uiRefreshNeeded = true
@@ -598,6 +668,7 @@ object SelfHostedSync {
                     }
                 }
                 state.keys[entry.key] = KeyState(hash(entry.value), entry.updatedAt)
+                ownWrites.remove(entry.key)
             }
         }
         dataEditor.apply()

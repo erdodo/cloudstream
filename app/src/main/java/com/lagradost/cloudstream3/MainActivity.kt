@@ -143,6 +143,7 @@ import com.lagradost.cloudstream3.utils.BackPressedCallbackHelper.detachBackPres
 import com.lagradost.cloudstream3.utils.BackupUtils.backup
 import com.lagradost.cloudstream3.utils.BackupUtils.setUpBackup
 import com.lagradost.cloudstream3.utils.DeviceTier
+import com.lagradost.cloudstream3.utils.SelfHostedSync
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.BiometricCallback
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.biometricPrompt
 import com.lagradost.cloudstream3.utils.BiometricAuthenticator.deviceHasPasswordPinLock
@@ -642,6 +643,8 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
     override fun onResume() {
         super.onResume()
+        // Back in front (maybe after the screen was off): reconnect and pull before anything opens.
+        SelfHostedSync.onForeground()
         afterPluginsLoadedEvent += ::onAllPluginsLoaded
         setActivityInstance(this)
         try {
@@ -655,6 +658,7 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
     override fun onPause() {
         super.onPause()
+        SelfHostedSync.onBackground()
 
         // Start any delayed updates
         if (ApkInstaller.delayedInstaller?.startInstallation() == true) {
